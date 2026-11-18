@@ -186,7 +186,9 @@ public:
         {
             CutoffDetector d;
             d.prepare (rate);
-            std::vector<float> f (x.begin(), x.end());
+            std::vector<float> f (x.size());
+            for (size_t i = 0; i < x.size(); ++i)
+                f[i] = static_cast<float> (x[i]);
             d.pushSamples (f.data(), (int) f.size());
             return d;
         };
