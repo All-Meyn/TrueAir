@@ -44,6 +44,8 @@ juce_add_plugin(TrueAir
     COPY_PLUGIN_AFTER_BUILD  FALSE)
 
 target_sources(TrueAir PRIVATE
+    Source/AirRestorer.cpp
+    Source/CutoffDetector.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
 
