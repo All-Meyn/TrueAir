@@ -38,3 +38,21 @@ ctest --preset release
 
 Outputs land in `build/release/TrueAir_artefacts/Release/` (VST3, Standalone, and AU on macOS).
 Use the `debug` preset for development builds.
+
+### Windows
+
+Requires Visual Studio 2022 or newer with the "Desktop development with C++" workload, and CMake 3.22+.
+From a Developer PowerShell or a normal terminal:
+
+```powershell
+cmake --preset windows
+cmake --build --preset windows-release
+ctest --preset windows-release
+```
+
+The VST3 lands in `build\windows\TrueAir_artefacts\Release\VST3\TrueAir.vst3`. Copy it to
+`C:\Program Files\Common Files\VST3\`. It links the C++ runtime statically, so users don't need
+the Visual C++ Redistributable.
+
+CI (`.github/workflows/windows-vst3.yml`) builds and tests this on every pull request and push to
+`main`, and uploads the VST3 as the `TrueAir-VST3-Windows-x64` artifact.

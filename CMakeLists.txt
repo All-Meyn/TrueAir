@@ -5,6 +5,10 @@ project(TrueAir VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Windows: link the C++ runtime statically (/MT, /MTd) so the plugin loads without
+# the Visual C++ Redistributable installed. Must be set before any target exists.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # Speed up rebuilds when ccache is available
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
