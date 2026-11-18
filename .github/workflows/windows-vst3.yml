@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure
         run: cmake --preset windows
@@ -32,7 +32,7 @@ jobs:
         run: ctest --preset windows-release
 
       - name: Upload VST3
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: TrueAir-VST3-Windows-x64
           path: build/windows/TrueAir_artefacts/Release/VST3/
