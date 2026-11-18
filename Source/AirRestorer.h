@@ -14,7 +14,16 @@
                                                      never reaches the output)
       air   = 48 dB/oct high-pass at cutoff, 48 dB/oct low-pass at 0.45*host rate
     then downsampled, and at the host rate:
-      out   = air * (seedEnv / airEnv) * tilt       (follow the seed's dynamics)
+      tonal = air * (seedEnv / airEnv)              (follow the seed's dynamics)
+      noise = high-passed noise * (fastSeedEnv / noiseEnv)
+      w     = transient weight from fast (2 ms) vs slow (40 ms) seed RMS
+      out   = (sqrt(1-w)*tonal + sqrt(w)*noise) * tilt
+
+    Transient vs tonal split: harmonic synthesis suits sustained, pitched content,
+    but on sharp transients (cymbals, consonants) it can sound ringy or metallic.
+    While the seed band is rising fast, the air crossfades (equal power) to a noise
+    burst that follows the transient's fast envelope; steady material keeps the
+    harmonic air.
 
     Envelope matching runs AFTER downsampling, so it measures only the air that is
     actually output: most harmonic energy lands above host Nyquist and is discarded.
@@ -48,10 +57,15 @@ public:
         @param cutoffHz   codec cutoff: seed band ends here, air starts here
         @param drive      waveshaper drive, linear gain (>= 1)
         @param tilt       air level relative to the seed band, linear gain
+        @param transients 0..1: how strongly transients use the noise path
+                          (0 = harmonic air only)
     */
     void process (const juce::dsp::AudioBlock<const float>& input,
                   juce::dsp::AudioBlock<float>& airOut,
-                  float cutoffHz, float drive, float tilt) noexcept;
+                  float cutoffHz, float drive, float tilt, float transients = 0.0f) noexcept;
+
+    /** Peak transient weight (0..1, before the `transients` amount) in the last block. */
+    float getLastTransientWeight() const noexcept { return lastTransientPeak; }
 
 private:
     using Filter = juce::dsp::StateVariableTPTFilter<float>;
@@ -67,6 +81,12 @@ private:
         Filter envSeedHighPass, envSeedLowPass1, envSeedLowPass2;
         float seedEnv = 0.0f; // power envelopes (mean square)
         float airEnv  = 0.0f;
+
+        // Host rate: transient detection and noise-burst path.
+        std::array<Filter, 4> noiseHighPass; // 8th-order Butterworth at the cutoff
+        std::array<Filter, 2> noiseLowPass;  // 0.45 x host rate, like the harmonic air
+        float fastPow = 0.0f, slowPow = 0.0f, noiseEnv = 0.0f, transientW = 0.0f;
+        juce::uint32 rng = 1;
     };
 
     void setFilterCutoffs (float cutoffHz) noexcept;
@@ -74,13 +94,15 @@ private:
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> seedDelay;
     std::vector<ChannelState> channels;
-    std::vector<float> driveRamp, tiltRamp;
+    std::vector<float> driveRamp, tiltRamp, transientRamp;
 
-    juce::SmoothedValue<float> smoothedDrive, smoothedTilt;
+    juce::SmoothedValue<float> smoothedDrive, smoothedTilt, smoothedTransients;
 
     double hostRate = 0.0, oversampledRate = 0.0;
     int maxBlockSize = 0;
     int latencySamples = 0;
     float lastCutoffHz = -1.0f;
     float attackCoeff = 0.0f, releaseCoeff = 0.0f;
+    float fastCoeff = 0.0f, slowCoeff = 0.0f, holdCoeff = 0.0f, noiseEnvCoeff = 0.0f;
+    float lastTransientPeak = 0.0f;
 };

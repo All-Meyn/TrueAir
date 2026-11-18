@@ -13,9 +13,11 @@ TrueAirAudioProcessor::TrueAirAudioProcessor()
     driveDb      = parameters.getRawParameterValue (TrueAirParams::driveId);
     autoCutoff   = parameters.getRawParameterValue (TrueAirParams::autoCutoffId);
     manualCutoff = parameters.getRawParameterValue (TrueAirParams::cutoffId);
+    transientPct = parameters.getRawParameterValue (TrueAirParams::transientsId);
 
     jassert (gainDb != nullptr && amountPct != nullptr && brightnessDb != nullptr
-             && driveDb != nullptr && autoCutoff != nullptr && manualCutoff != nullptr);
+             && driveDb != nullptr && autoCutoff != nullptr && manualCutoff != nullptr
+             && transientPct != nullptr);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout TrueAirAudioProcessor::createParameterLayout()
@@ -62,6 +64,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout TrueAirAudioProcessor::creat
         juce::NormalisableRange<float> (CutoffDetector::minSearchHz, 20000.0f, 10.0f),
         16000.0f,
         juce::AudioParameterFloatAttributes().withLabel ("Hz")));
+
+    // How strongly transients (cymbals, consonants) switch from harmonic air to a
+    // noise burst. 0% = harmonic air only.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { transientsId, 1 },
+        "Transients",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f),
+        100.0f,
+        juce::AudioParameterFloatAttributes().withLabel ("%")));
 
     return layout;
 }
@@ -183,7 +194,8 @@ void TrueAirAudioProcessor::processChunk (juce::dsp::AudioBlock<float> block) no
     {
         const float drive = juce::Decibels::decibelsToGain (driveDb->load());
         const float tilt  = juce::Decibels::decibelsToGain (brightnessDb->load());
-        restorer.process (juce::dsp::AudioBlock<const float> (block), airBlock, cutoff, drive, tilt);
+        const float transients = transientPct->load() * 0.01f;
+        restorer.process (juce::dsp::AudioBlock<const float> (block), airBlock, cutoff, drive, tilt, transients);
 
         for (size_t i = 0; i < n; ++i)
             mixScratch[i] = smoothedAmount.getNextValue() * restoreFade.getNextValue();

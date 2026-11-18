@@ -437,9 +437,226 @@ public:
     }
 };
 
+//==============================================================================
+class TransientTests final : public juce::UnitTest
+{
+public:
+    TransientTests() : juce::UnitTest ("Transients", "TrueAir") {}
+
+    struct Render
+    {
+        juce::AudioBuffer<float> air;
+        std::vector<float> weights; // transient weight peak per block
+        int latency = 0;
+    };
+
+    static Render render (const juce::AudioBuffer<float>& in, float transients, int block = 32, float tiltDb = 0.0f)
+    {
+        AirRestorer r;
+        r.prepare (testRate, block, in.getNumChannels());
+        Render out;
+        out.air.setSize (in.getNumChannels(), in.getNumSamples());
+        out.latency = r.getLatencySamples();
+        for (int start = 0; start < in.getNumSamples(); start += block)
+        {
+            const auto len = (size_t) juce::jmin (block, in.getNumSamples() - start);
+            juce::dsp::AudioBlock<const float> ib (in);
+            juce::dsp::AudioBlock<float> ob (out.air);
+            auto obSub = ob.getSubBlock ((size_t) start, len);
+            r.process (ib.getSubBlock ((size_t) start, len), obSub, 16000.0f,
+                       juce::Decibels::decibelsToGain (6.0f), juce::Decibels::decibelsToGain (tiltDb), transients);
+            out.weights.push_back (r.getLastTransientWeight());
+        }
+        return out;
+    }
+
+    static juce::AudioBuffer<float> mono (const std::vector<double>& x)
+    {
+        juce::AudioBuffer<float> b (1, (int) x.size());
+        for (size_t i = 0; i < x.size(); ++i)
+            b.setSample (0, (int) i, (float) x[i]);
+        return b;
+    }
+
+    static double energy (const juce::AudioBuffer<float>& b, int from, int to)
+    {
+        double e = 0.0;
+        for (int i = juce::jmax (0, from); i < juce::jmin (to, b.getNumSamples()); ++i)
+            e += (double) b.getSample (0, i) * b.getSample (0, i);
+        return e;
+    }
+
+    /** Spectral flatness (dB, 0 = perfectly flat) of channel 0 in [loHz, hiHz], from 1024-point
+        frames starting at each given position. Peaky, tonal spectra read far below 0. */
+    static float flatnessDb (const juce::AudioBuffer<float>& b, const std::vector<int>& starts, float loHz, float hiHz)
+    {
+        constexpr int order = 10, size = 1 << order;
+        juce::dsp::FFT fft (order);
+        std::vector<float> data (size * 2), acc (size / 2 + 1, 0.0f);
+        for (int s0 : starts)
+        {
+            for (int i = 0; i < size; ++i)
+            {
+                const float w = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) size);
+                data[(size_t) i] = (s0 + i < b.getNumSamples() ? b.getSample (0, s0 + i) : 0.0f) * w;
+            }
+            std::fill (data.begin() + size, data.end(), 0.0f);
+            fft.performFrequencyOnlyForwardTransform (data.data(), true);
+            for (size_t k = 0; k < acc.size(); ++k)
+                acc[k] += data[k] * data[k];
+        }
+        const float binHz = (float) testRate / (float) size;
+        const int lo = juce::roundToInt (loHz / binHz), hi = juce::roundToInt (hiHz / binHz);
+        double logSum = 0.0, sum = 0.0;
+        for (int k = lo; k <= hi; ++k)
+        {
+            const double p = acc[(size_t) k] + 1.0e-30;
+            logSum += std::log (p);
+            sum += p;
+        }
+        const int count = hi - lo + 1;
+        return (float) (10.0 * std::log10 (std::exp (logSum / count) / (sum / count)));
+    }
+
+    void runTest() override
+    {
+        const int n = (int) testRate * 2;
+
+        beginTest ("Stationary noise stays on the harmonic path");
+        {
+            auto x = whiteNoise (n, 20, 0.25);
+            applyBrickwall (x, testRate, 16000.0);
+            const auto res = render (mono (x), 1.0f);
+
+            double mean = 0.0;
+            int count = 0;
+            for (size_t b = res.weights.size() / 4; b < res.weights.size(); ++b, ++count)
+                mean += res.weights[b];
+            mean /= juce::jmax (1, count);
+            logMessage ("  mean transient weight " + juce::String (mean, 3));
+            expectLessThan ((float) mean, 0.1f, "steady material should not be treated as transient");
+        }
+
+        // Struck-metal-like hits: inharmonic partials in the seed octave, 80 ms decay,
+        // one hit every 400 ms over a quiet broadband bed (keeps the gate open between hits).
+        const std::array<double, 10> partials { 8370, 9130, 9810, 10690, 11270, 12110, 12940, 13580, 14430, 15260 };
+        const int hitSpacing = (int) (0.4 * testRate);
+        std::vector<int> onsets;
+        auto bed = whiteNoise (n, 21, 0.004);
+        applyBrickwall (bed, testRate, 16000.0);
+        std::vector<double> hits (bed);
+        for (int onset = hitSpacing / 2; onset + hitSpacing <= n; onset += hitSpacing)
+        {
+            onsets.push_back (onset);
+            for (int i = 0; i < hitSpacing; ++i)
+            {
+                const double t = i / testRate, env = 0.06 * std::exp (-t / 0.08);
+                double v = 0.0;
+                for (size_t k = 0; k < partials.size(); ++k)
+                    v += std::sin (juce::MathConstants<double>::twoPi * partials[k] * t + (double) k);
+                hits[(size_t) (onset + i)] += env * v;
+            }
+        }
+        const auto hitsIn = mono (hits);
+
+        beginTest ("Transients are detected at each onset");
+        {
+            const auto res = render (hitsIn, 1.0f);
+            float minPeak = 1.0f;
+            for (int onset : onsets)
+            {
+                float peak = 0.0f;
+                const int firstBlock = (onset + res.latency) / 32, lastBlock = (onset + res.latency + (int) (0.01 * testRate)) / 32;
+                for (int b = firstBlock; b <= lastBlock && b < (int) res.weights.size(); ++b)
+                    peak = juce::jmax (peak, res.weights[(size_t) b]);
+                minPeak = juce::jmin (minPeak, peak);
+            }
+            logMessage ("  weakest onset weight " + juce::String (minPeak, 2) + " over " + juce::String ((int) onsets.size()) + " hits");
+            expectGreaterThan (minPeak, 0.8f);
+        }
+
+        beginTest ("Transient air does not start before the transient (no pre-echo)");
+        {
+            for (const float amount : { 0.0f, 1.0f })
+            {
+                const auto res = render (hitsIn, amount);
+                double pre = 0.0, post = 0.0;
+                for (int onset : onsets)
+                {
+                    const int at = onset + res.latency;
+                    pre  += energy (res.air, at - (int) (0.003 * testRate), at - 4);
+                    post += energy (res.air, at, at + (int) (0.010 * testRate));
+                }
+                const auto ratioDb = (float) (10.0 * std::log10 ((pre + 1.0e-30) / (post + 1.0e-30)));
+                logMessage ("  transients " + juce::String (amount * 100.0f, 0) + "%: 3 ms before onset "
+                            + juce::String (ratioDb, 1) + " dB vs 10 ms after");
+                if (amount > 0.0f)
+                    expectLessThan (ratioDb, -20.0f);
+            }
+        }
+
+        beginTest ("Struck-metal transients get flatter (less metallic) air");
+        {
+            float flat[2] {};
+            for (int a = 0; a < 2; ++a)
+            {
+                const auto res = render (hitsIn, (float) a);
+                std::vector<int> starts;
+                for (int onset : onsets)
+                    starts.push_back (onset + res.latency); // first ~23 ms of each hit
+                flat[a] = flatnessDb (res.air, starts, 16500.0f, 20000.0f);
+            }
+            logMessage ("  air flatness in first 23 ms: harmonic only " + juce::String (flat[0], 1)
+                        + " dB, with transients " + juce::String (flat[1], 1) + " dB (0 dB = flat)");
+            expectGreaterThan (flat[1] - flat[0], 3.0f, "noise burst should be clearly flatter than harmonic air");
+        }
+
+        beginTest ("Sustained tone keeps clean harmonic air");
+        {
+            std::vector<double> x ((size_t) n);
+            for (int i = 0; i < n; ++i)
+                x[(size_t) i] = 0.25 * std::sin (juce::MathConstants<double>::twoPi * 9000.0 * i / testRate);
+            const auto res = render (mono (x), 1.0f);
+
+            float lateMax = 0.0f;
+            for (size_t b = res.weights.size() / 2; b < res.weights.size(); ++b)
+                lateMax = juce::jmax (lateMax, res.weights[b]);
+
+            const float peak  = bandLevelDb (res.air, n / 2, 17950.0f, 18050.0f);
+            const float floor = bandLevelDb (res.air, n / 2, 16500.0f, 17500.0f);
+            logMessage ("  steady-state weight max " + juce::String (lateMax, 3) + "; 18 kHz harmonic "
+                        + juce::String (peak - floor, 1) + " dB above the 16.5-17.5 kHz floor");
+            expectLessThan (lateMax, 0.05f);
+            expectGreaterThan (peak - floor, 30.0f);
+        }
+
+        beginTest ("Air is the same on every render (seeded noise)");
+        {
+            const auto a = render (hitsIn, 1.0f), b = render (hitsIn, 1.0f);
+            int diffs = 0;
+            for (int i = 0; i < a.air.getNumSamples(); ++i)
+                if (! juce::exactlyEqual (a.air.getSample (0, i), b.air.getSample (0, i)))
+                    ++diffs;
+            expectEquals (diffs, 0);
+        }
+
+        beginTest ("Brightness stays calibrated with Transients at 100%");
+        {
+            auto x = whiteNoise (n, 22, 0.25);
+            applyBrickwall (x, testRate, 16000.0);
+            const auto in = mono (x);
+            const auto res = render (in, 1.0f, 512, -18.0f);
+            const float ratio = bandTotalDb (res.air, n / 4, 16000.0f, 21500.0f) - bandTotalDb (in, n / 4, 8000.0f, 16000.0f);
+            logMessage ("  air vs seed band " + juce::String (ratio, 1) + " dB (Brightness -18 dB)");
+            expectWithinAbsoluteError (ratio, -18.0f, 3.0f);
+        }
+    }
+};
+
 static TrueAirProcessorTests trueAirProcessorTests;
 static CutoffDetectorTests cutoffDetectorTests;
 static RestorationTests restorationTests;
+static TransientTests transientTests;
 
 int main()
 {

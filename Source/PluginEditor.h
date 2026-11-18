@@ -28,7 +28,7 @@ private:
 
     TrueAirAudioProcessor& processor;
 
-    Knob amount, brightness, drive, cutoff, gain;
+    Knob amount, brightness, drive, transients, cutoff, gain;
     juce::ToggleButton autoCutoffButton { "Auto" };
     std::unique_ptr<ButtonAttachment> autoCutoffAttachment;
     juce::Label statusLabel;
