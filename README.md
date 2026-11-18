@@ -16,7 +16,13 @@ steep low-pass, typically somewhere between 15 and 20 kHz.
 3. **Envelope matching** at the host rate gives the new air the dynamics of the band below it.
    **Brightness** sets its level relative to that band.
 
-Parameters: **Amount**, **Brightness**, **Drive** (adds odd harmonics), **Auto** / manual **Cutoff**,
+4. **Transient vs tonal split**: harmonic air suits sustained, pitched sounds but can make
+   cymbals and consonants ring or sound metallic. When the band below the cutoff rises
+   sharply (fast vs slow RMS), the air crossfades to a noise burst that follows the
+   transient's fast envelope, then returns to harmonic air.
+
+Parameters: **Amount**, **Brightness**, **Drive** (adds odd harmonics), **Transients** (how strongly
+transients use the noise burst; 0% = harmonic air only), **Auto** / manual **Cutoff**,
 **Output Gain**.
 
 ## Building

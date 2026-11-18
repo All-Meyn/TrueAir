@@ -15,6 +15,7 @@ namespace TrueAirParams
     inline constexpr auto driveId      = "drive";
     inline constexpr auto autoCutoffId = "autoCutoff";
     inline constexpr auto cutoffId     = "cutoff";
+    inline constexpr auto transientsId = "transients";
 }
 
 class TrueAirAudioProcessor final : public juce::AudioProcessor
@@ -67,6 +68,7 @@ private:
     std::atomic<float>* driveDb      = nullptr;
     std::atomic<float>* autoCutoff   = nullptr;
     std::atomic<float>* manualCutoff = nullptr;
+    std::atomic<float>* transientPct = nullptr;
 
     CutoffDetector detector;
     AirRestorer restorer;

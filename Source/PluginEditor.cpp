@@ -6,6 +6,7 @@ TrueAirAudioProcessorEditor::TrueAirAudioProcessorEditor (TrueAirAudioProcessor&
     setUpKnob (amount,     TrueAirParams::amountId,     "Amount");
     setUpKnob (brightness, TrueAirParams::brightnessId, "Brightness");
     setUpKnob (drive,      TrueAirParams::driveId,      "Drive");
+    setUpKnob (transients, TrueAirParams::transientsId, "Transients");
     setUpKnob (cutoff,     TrueAirParams::cutoffId,     "Cutoff");
     setUpKnob (gain,       TrueAirParams::gainId,       "Output Gain");
 
@@ -15,7 +16,7 @@ TrueAirAudioProcessorEditor::TrueAirAudioProcessorEditor (TrueAirAudioProcessor&
     statusLabel.setJustificationType (juce::Justification::centred);
     addAndMakeVisible (statusLabel);
 
-    setSize (560, 260);
+    setSize (660, 260);
     timerCallback();
     startTimerHz (10);
 }
@@ -67,8 +68,8 @@ void TrueAirAudioProcessorEditor::resized()
 
     statusLabel.setBounds (area.removeFromBottom (24));
 
-    const int knobWidth = area.getWidth() / 5;
-    for (auto* k : { &amount, &brightness, &drive, &cutoff, &gain })
+    const int knobWidth = area.getWidth() / 6;
+    for (auto* k : { &amount, &brightness, &drive, &transients, &cutoff, &gain })
     {
         auto column = area.removeFromLeft (knobWidth).reduced (4, 0);
         k->label.setBounds (column.removeFromTop (20));

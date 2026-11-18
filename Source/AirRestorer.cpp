@@ -15,6 +15,28 @@ namespace
     constexpr float attackSeconds  = 0.0015f;
     constexpr float releaseSeconds = 0.025f;
 
+    // Transient detection: fast vs slow RMS of the seed band.
+    constexpr float fastSeconds      = 0.002f;
+    constexpr float slowSeconds      = 0.040f;
+    constexpr float transientHoldSec = 0.060f;     // release of the transient weight
+    constexpr float noiseEnvSeconds  = 0.025f;
+    constexpr float transientLowRatio  = 2.5119f;  // +4 dB fast over slow: weight 0
+    constexpr float transientHighRatio = 10.0f;    // +10 dB: weight 1
+
+    float onePole (float seconds, double rate) noexcept
+    {
+        return std::exp (-1.0f / (seconds * static_cast<float> (rate)));
+    }
+
+    // xorshift32: deterministic, allocation-free white noise in [-1, 1).
+    float nextNoise (juce::uint32& state) noexcept
+    {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return static_cast<float> (state) * (2.0f / 4294967296.0f) - 1.0f;
+    }
+
     // Q of each 2nd-order section of an 8th-order Butterworth filter.
     constexpr std::array<float, 4> butterworth8Q { 0.5098f, 0.6013f, 0.9000f, 2.5629f };
 
@@ -82,6 +104,17 @@ void AirRestorer::prepare (double hostSampleRate, int maximumBlockSize, int numC
         prepareFilter (ch.envSeedHighPass, hostSpec, Type::highpass);
         prepareFilter (ch.envSeedLowPass1, hostSpec, Type::lowpass);
         prepareFilter (ch.envSeedLowPass2, hostSpec, Type::lowpass);
+
+        for (size_t k = 0; k < ch.noiseHighPass.size(); ++k)
+        {
+            prepareFilter (ch.noiseHighPass[k], hostSpec, Type::highpass);
+            ch.noiseHighPass[k].setResonance (butterworth8Q[k]);
+        }
+        for (auto& f : ch.noiseLowPass)
+        {
+            prepareFilter (f, hostSpec, Type::lowpass);
+            f.setCutoffFrequency (static_cast<float> (0.45 * hostSampleRate));
+        }
     }
 
     seedDelay.prepare ({ hostSampleRate, static_cast<juce::uint32> (maximumBlockSize), static_cast<juce::uint32> (numChannels) });
@@ -90,14 +123,21 @@ void AirRestorer::prepare (double hostSampleRate, int maximumBlockSize, int numC
 
     driveRamp.assign (osBlock, 1.0f);
     tiltRamp.assign (static_cast<size_t> (maximumBlockSize), 0.0f);
+    transientRamp.assign (static_cast<size_t> (maximumBlockSize), 0.0f);
 
     smoothedDrive.reset (oversampledRate, 0.05);
     smoothedTilt.reset (hostSampleRate, 0.05);
     smoothedDrive.setCurrentAndTargetValue (1.0f); // never 0: the shaper divides by drive
     smoothedTilt.setCurrentAndTargetValue (0.0f);
+    smoothedTransients.reset (hostSampleRate, 0.05);
+    smoothedTransients.setCurrentAndTargetValue (0.0f);
 
     attackCoeff  = std::exp (-1.0f / (attackSeconds  * static_cast<float> (hostSampleRate)));
     releaseCoeff = std::exp (-1.0f / (releaseSeconds * static_cast<float> (hostSampleRate)));
+    fastCoeff     = onePole (fastSeconds, hostSampleRate);
+    slowCoeff     = onePole (slowSeconds, hostSampleRate);
+    holdCoeff     = onePole (transientHoldSec, hostSampleRate);
+    noiseEnvCoeff = onePole (noiseEnvSeconds, hostSampleRate);
 
     lastCutoffHz = -1.0f;
     setFilterCutoffs (16000.0f);
@@ -120,12 +160,26 @@ void AirRestorer::reset() noexcept
             f.reset();
         for (auto& f : ch.airLowPass)
             f.reset();
+        for (auto& f : ch.noiseHighPass)
+            f.reset();
+        for (auto& f : ch.noiseLowPass)
+            f.reset();
         ch.seedEnv = 0.0f;
         ch.airEnv  = 0.0f;
+        ch.fastPow = ch.slowPow = ch.noiseEnv = ch.transientW = 0.0f;
     }
+
+    // Fixed seed: identical input renders identically (bounces, tests, null checks).
+    // Same sequence in every channel, so each channel's envelope places the burst and
+    // a centred transient keeps a centred image instead of turning diffuse.
+    for (auto& ch : channels)
+        ch.rng = 0x9E3779B9u;
+
+    lastTransientPeak = 0.0f;
 
     smoothedDrive.setCurrentAndTargetValue (smoothedDrive.getTargetValue());
     smoothedTilt.setCurrentAndTargetValue (smoothedTilt.getTargetValue());
+    smoothedTransients.setCurrentAndTargetValue (smoothedTransients.getTargetValue());
 }
 
 void AirRestorer::setFilterCutoffs (float cutoffHz) noexcept
@@ -146,12 +200,15 @@ void AirRestorer::setFilterCutoffs (float cutoffHz) noexcept
 
         for (auto& f : ch.airHighPass)
             f.setCutoffFrequency (cutoffHz);
+
+        for (auto& f : ch.noiseHighPass)
+            f.setCutoffFrequency (cutoffHz);
     }
 }
 
 void AirRestorer::process (const juce::dsp::AudioBlock<const float>& input,
                            juce::dsp::AudioBlock<float>& airOut,
-                           float cutoffHz, float drive, float tilt) noexcept
+                           float cutoffHz, float drive, float tilt, float transients) noexcept
 {
     jassert (oversampler != nullptr);
     jassert (input.getNumSamples() <= static_cast<size_t> (maxBlockSize));
@@ -203,8 +260,14 @@ void AirRestorer::process (const juce::dsp::AudioBlock<const float>& input,
     const auto n = input.getNumSamples();
 
     smoothedTilt.setTargetValue (tilt);
+    smoothedTransients.setTargetValue (juce::jlimit (0.0f, 1.0f, transients));
     for (size_t i = 0; i < n; ++i)
+    {
         tiltRamp[i] = smoothedTilt.getNextValue();
+        transientRamp[i] = smoothedTransients.getNextValue();
+    }
+
+    float transientPeak = 0.0f;
 
     for (size_t c = 0; c < channels.size(); ++c)
     {
@@ -215,6 +278,8 @@ void AirRestorer::process (const juce::dsp::AudioBlock<const float>& input,
 
         float seedEnv = st.seedEnv;
         float airEnv  = st.airEnv;
+        float fastPow = st.fastPow, slowPow = st.slowPow, noiseEnv = st.noiseEnv, w = st.transientW;
+        auto rng = st.rng;
 
         for (size_t i = 0; i < n; ++i)
         {
@@ -235,11 +300,42 @@ void AirRestorer::process (const juce::dsp::AudioBlock<const float>& input,
             const float seedRms = std::sqrt (seedEnv);
             const float gate = juce::jlimit (0.0f, 1.0f, (seedRms - gateLow) / (gateHigh - gateLow));
             const float matchGain = juce::jmin (std::sqrt (seedEnv / (airEnv + 1.0e-18f)), maxEnvGain);
+            const float tonal = air[i] * matchGain;
 
-            air[i] *= matchGain * tiltRamp[i] * gate;
+            // Transient weight: how far the fast seed RMS sits above the slow one.
+            // Rises instantly, releases over transientHoldSec to cover the burst's decay.
+            fastPow = seedPow + fastCoeff * (fastPow - seedPow);
+            slowPow = seedPow + slowCoeff * (slowPow - seedPow);
+            const float ratio = fastPow / (slowPow + 1.0e-20f);
+            const float wRaw = juce::jlimit (0.0f, 1.0f, (ratio - transientLowRatio) / (transientHighRatio - transientLowRatio));
+            w = wRaw > w ? wRaw : wRaw + holdCoeff * (w - wRaw);
+            transientPeak = juce::jmax (transientPeak, c == 0 ? w : 0.0f);
+
+            // Noise burst above the cutoff, following the FAST seed envelope so it stays
+            // as sharp as the transient. Always run, so its filters stay settled.
+            float noise = nextNoise (rng);
+            for (auto& f : st.noiseHighPass)
+                noise = f.processSample (0, noise);
+            for (auto& f : st.noiseLowPass)
+                noise = f.processSample (0, noise);
+            noiseEnv = noise * noise + noiseEnvCoeff * (noiseEnv - noise * noise);
+            const float noiseGain = juce::jmin (std::sqrt (fastPow / (noiseEnv + 1.0e-18f)), maxEnvGain);
+
+            // Equal-power crossfade: tonal and noise air are uncorrelated.
+            const float wt = w * transientRamp[i];
+            const float mixed = std::sqrt (1.0f - wt) * tonal + std::sqrt (wt) * noise * noiseGain;
+
+            air[i] = mixed * tiltRamp[i] * gate;
         }
 
         st.seedEnv = seedEnv;
         st.airEnv  = airEnv;
+        st.fastPow = fastPow;
+        st.slowPow = slowPow;
+        st.noiseEnv = noiseEnv;
+        st.transientW = w;
+        st.rng = rng;
     }
+
+    lastTransientPeak = transientPeak;
 }
